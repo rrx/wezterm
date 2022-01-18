@@ -14,8 +14,10 @@ use std::rc::Rc;
 use structopt::StructOpt;
 use tabout::{tabulate_output, Alignment, Column};
 use umask::UmaskSaver;
-use wezterm_client::client::{unix_connect_with_retry, Client};
+use wezterm_client::client::{unix_connect_with_retry, Client, AsyncReadAndWrite, ReaderMessage};
 use wezterm_gui_subcommands::*;
+use codec::Pdu;
+use futures::FutureExt;
 
 //    let message = "; ❤ 😍🤢\n\x1b[91;mw00t\n\x1b[37;104;m bleet\x1b[0;m.";
 
@@ -118,6 +120,9 @@ enum CliSubCommand {
 
     #[structopt(name = "proxy", about = "start rpc proxy pipe")]
     Proxy,
+
+    #[structopt(name = "dump", about = "dump rpc data")]
+    Dump,
 
     #[structopt(name = "tlscreds", about = "obtain tls credentials")]
     TlsCreds,
@@ -661,6 +666,41 @@ async fn run_cli_async(config: config::ConfigHandle, cli: CliCommand) -> anyhow:
 
             // Wait forever; the stdio threads will terminate on EOF
             smol::future::pending().await
+        }
+        CliSubCommand::Dump => {
+            // server is spawned, now we read and dump
+            drop(client);
+
+            let mux = Rc::new(mux::Mux::new(None));
+            Mux::set_mux(&mux);
+            let unix_dom = config.unix_domains.first().unwrap();
+            let target = unix_dom.target();
+            let u_stream = unix_connect_with_retry(&target, false, None)?;
+            let mut from_stream = Box::new(smol::Async::new(u_stream)?);
+
+            // Spawn a thread to pull data from the socket and write
+            // it to stdout
+            //let mut from_stream = stream.try_clone()?;
+            let activity = Activity::new();
+            let stdout = std::io::stdout();
+            let mut buf = [0u8; 8192];
+            loop {
+                match from_stream.readable().await {
+                    Ok(()) => match Pdu::decode_async(&mut from_stream).await {
+                        Ok(decoded) => {
+                            log::info!("{:?}", decoded);
+                        }
+                        Err(err) => {
+                            let reason = format!("Error while decoding response pdu: {:#}", err);
+                            log::error!("{}", reason);
+                        }
+                    }
+                    _ =>  break
+                }
+            }
+            std::thread::sleep(std::time::Duration::new(2, 0));
+            drop(activity);
+            std::process::exit(0);
         }
         CliSubCommand::TlsCreds => {
             let creds = client.get_tls_creds().await?;

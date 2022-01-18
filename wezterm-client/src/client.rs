@@ -30,7 +30,7 @@ use std::thread;
 use std::time::Duration;
 use thiserror::Error;
 
-enum ReaderMessage {
+pub enum ReaderMessage {
     SendPdu {
         pdu: Pdu,
         promise: Sender<anyhow::Result<Pdu>>,
