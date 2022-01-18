@@ -10,7 +10,7 @@ pub type TmuxSessionId = u64;
 mod parser {
     use pest_derive::Parser;
     #[derive(Parser)]
-    #[grammar = "tmux.pest"]
+    #[grammar = "tmux_cc/tmux.pest"]
     pub struct TmuxParser;
 }
 
@@ -311,7 +311,7 @@ fn parse_line(line: &str) -> anyhow::Result<Event> {
 
 /// Decode OpenBSD `vis` encoded strings
 /// See: https://github.com/tmux/tmux/blob/486ce9b09855ae30a2bf5e576cb6f7ad37792699/compat/unvis.c
-fn unvis(s: &str) -> anyhow::Result<String> {
+pub fn unvis(s: &str) -> anyhow::Result<String> {
     enum State {
         Ground,
         Start,
@@ -489,30 +489,42 @@ impl Parser {
         }
     }
 
-    pub fn advance_byte(&mut self, c: u8) -> Option<Event> {
+    pub fn advance_byte(&mut self, c: u8) -> anyhow::Result<Option<Event>> {
         if c == b'\n' {
             self.process_line()
         } else {
             self.buffer.push(c);
-            None
+            Ok(None)
         }
     }
 
-    pub fn advance_string(&mut self, s: &str) -> Vec<Event> {
+    pub fn advance_string(&mut self, s: &str) -> anyhow::Result<Vec<Event>> {
         self.advance_bytes(s.as_bytes())
     }
 
-    pub fn advance_bytes(&mut self, bytes: &[u8]) -> Vec<Event> {
+    pub fn advance_bytes(&mut self, bytes: &[u8]) -> anyhow::Result<Vec<Event>> {
         let mut events = vec![];
-        for &b in bytes {
-            if let Some(event) = self.advance_byte(b) {
-                events.push(event);
+        for (i, &b) in bytes.iter().enumerate() {
+            match self.advance_byte(b) {
+                Ok(option_event) => {
+                    if let Some(e) = option_event {
+                        events.push(e);
+                    }
+                }
+                Err(err) => {
+                    // concat remained bytes after digested bytes
+                    return Err(anyhow::anyhow!(format!(
+                        "{}{}",
+                        err,
+                        String::from_utf8_lossy(&bytes[i..])
+                    )));
+                }
             }
         }
-        events
+        Ok(events)
     }
 
-    fn process_guarded_line(&mut self, line: String) -> Option<Event> {
+    fn process_guarded_line(&mut self, line: String) -> anyhow::Result<Option<Event>> {
         let result = match parse_line(&line) {
             Ok(Event::End {
                 timestamp,
@@ -563,10 +575,10 @@ impl Parser {
             }
         };
         self.buffer.clear();
-        return result;
+        return Ok(result);
     }
 
-    fn process_line(&mut self) -> Option<Event> {
+    fn process_line(&mut self) -> anyhow::Result<Option<Event>> {
         if self.buffer.last() == Some(&b'\r') {
             self.buffer.pop();
         }
@@ -597,7 +609,7 @@ impl Parser {
                     Ok(event) => Some(event),
                     Err(err) => {
                         log::error!("Unrecognized tmux cc line: {}", err);
-                        None
+                        return Err(anyhow::anyhow!(line.to_owned()));
                     }
                 }
             }
@@ -607,7 +619,7 @@ impl Parser {
             }
         };
         self.buffer.clear();
-        result
+        Ok(result)
     }
 }
 
@@ -667,7 +679,7 @@ here
 ";
 
         let mut p = Parser::new();
-        let events = p.advance_bytes(input);
+        let events = p.advance_bytes(input).unwrap();
         assert_eq!(
             vec![
                 Event::SessionsChanged,

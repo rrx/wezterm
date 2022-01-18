@@ -13,7 +13,6 @@
 
 use anyhow::{bail, Context as _, Error};
 use mux::client::{ClientId, ClientInfo};
-use mux::domain::DomainId;
 use mux::pane::PaneId;
 use mux::renderable::{RenderableDimensions, StableCursorPosition};
 use mux::tab::{PaneNode, SerdeUrl, SplitDirection, TabId};
@@ -406,7 +405,7 @@ macro_rules! pdu {
 /// The overall version of the codec.
 /// This must be bumped when backwards incompatible changes
 /// are made to the types and protocol.
-pub const CODEC_VERSION: usize = 15;
+pub const CODEC_VERSION: usize = 17;
 
 // Defines the Pdu enum.
 // Each struct has an explicit identifying number.
@@ -418,7 +417,6 @@ pdu! {
     Pong: 2,
     ListPanes: 3,
     ListPanesResponse: 4,
-    Spawn: 7,
     SpawnResponse: 8,
     WriteToPane: 9,
     UnitResponse: 10,
@@ -578,16 +576,6 @@ pub struct ListPanesResponse {
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Debug)]
-pub struct Spawn {
-    pub domain_id: DomainId,
-    /// If None, create a new window for this new tab
-    pub window_id: Option<WindowId>,
-    pub command: Option<CommandBuilder>,
-    pub command_dir: Option<String>,
-    pub size: PtySize,
-}
-
-#[derive(Deserialize, Serialize, PartialEq, Debug)]
 pub struct SplitPane {
     pub pane_id: PaneId,
     pub direction: SplitDirection,
@@ -604,6 +592,7 @@ pub struct SpawnV2 {
     pub command: Option<CommandBuilder>,
     pub command_dir: Option<String>,
     pub size: PtySize,
+    pub workspace: String,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Debug)]

@@ -253,6 +253,8 @@ pub struct TerminalState {
     /// printed character
     wrap_next: bool,
 
+    clear_semantic_attribute_on_newline: bool,
+
     /// If true, writing a character inserts a new cell
     insert: bool,
 
@@ -361,6 +363,8 @@ pub struct TerminalState {
     /// We don't want that, so we use this flag to remember
     /// whether we want to skip it or not.
     suppress_initial_title_change: bool,
+
+    accumulating_title: Option<String>,
 }
 
 #[derive(Debug)]
@@ -452,6 +456,7 @@ impl TerminalState {
             left_and_right_margins: 0..size.physical_cols,
             left_and_right_margin_mode: false,
             wrap_next: false,
+            clear_semantic_attribute_on_newline: false,
             // We default auto wrap to true even though the default for
             // a dec terminal is false, because it is more useful this way.
             dec_auto_wrap: true,
@@ -501,6 +506,7 @@ impl TerminalState {
             unicode_version,
             unicode_version_stack: vec![],
             suppress_initial_title_change: false,
+            accumulating_title: None,
         }
     }
 
@@ -837,8 +843,18 @@ impl TerminalState {
         &self.user_vars
     }
 
+    fn clear_semantic_attribute_due_to_movement(&mut self) {
+        if self.clear_semantic_attribute_on_newline {
+            self.clear_semantic_attribute_on_newline = false;
+            self.pen.set_semantic_type(SemanticType::default());
+        }
+    }
+
     /// Sets the cursor position to precisely the x and values provided
     fn set_cursor_position_absolute(&mut self, x: usize, y: VisibleRowIndex) {
+        if self.cursor.y != y {
+            self.clear_semantic_attribute_due_to_movement();
+        }
         self.cursor.y = y;
         self.cursor.x = x;
         self.cursor.seqno = self.seqno;

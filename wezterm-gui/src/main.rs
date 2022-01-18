@@ -42,9 +42,7 @@ mod update;
 mod utilsprites;
 
 pub use selection::SelectionMode;
-pub use termwindow::set_window_class;
-pub use termwindow::TermWindow;
-pub use termwindow::ICON_DATA;
+pub use termwindow::{set_window_class, TermWindow, ICON_DATA};
 
 #[derive(Debug, StructOpt)]
 #[structopt(
@@ -140,7 +138,7 @@ fn run_ssh(opts: SshCommand) -> anyhow::Result<()> {
         crate::set_window_class(cls);
     }
 
-    build_initial_mux(&config::configuration(), None)?;
+    build_initial_mux(&config::configuration(), None, None)?;
 
     let gui = crate::frontend::try_new()?;
 
@@ -167,15 +165,13 @@ fn run_serial(config: config::ConfigHandle, opts: &SerialCommand) -> anyhow::Res
 
     let pty_system = Box::new(serial);
     let domain: Arc<dyn Domain> = Arc::new(LocalDomain::with_pty_system("local", pty_system));
-    let mux = Rc::new(mux::Mux::new(Some(domain.clone())));
-    Mux::set_mux(&mux);
-    crate::update::load_last_release_info_and_set_banner();
+    let mux = setup_mux(domain.clone(), &config, Some("local"), None)?;
 
     let gui = crate::frontend::try_new()?;
     block_on(domain.attach())?; // FIXME: blocking
 
     {
-        let window_id = mux.new_empty_window();
+        let window_id = mux.new_empty_window(None);
         // FIXME: blocking
         let _tab = block_on(domain.spawn(config.initial_size(), None, None, *window_id))?;
     }
@@ -249,7 +245,7 @@ async fn async_run_mux_client(opts: ConnectCommand) -> anyhow::Result<()> {
 
 fn run_mux_client(opts: ConnectCommand) -> anyhow::Result<()> {
     let activity = Activity::new();
-    build_initial_mux(&config::configuration(), None)?;
+    build_initial_mux(&config::configuration(), None, opts.workspace.as_deref())?;
     let gui = crate::frontend::try_new()?;
     promise::spawn::spawn(async {
         if let Err(err) = async_run_mux_client(opts).await {
@@ -291,7 +287,7 @@ async fn spawn_tab_in_default_domain_if_mux_is_empty(
         true
     });
 
-    let window_id = mux.new_empty_window();
+    let window_id = mux.new_empty_window(None);
     let _tab = domain
         .spawn(config.initial_size(), cmd, None, *window_id)
         .await?;
@@ -417,6 +413,7 @@ impl Publish {
         &mut self,
         cmd: Option<CommandBuilder>,
         config: &ConfigHandle,
+        workspace: Option<&str>,
     ) -> anyhow::Result<bool> {
         if let Publish::TryPathOrPublish(gui_sock) = &self {
             let dom = config::UnixDomain {
@@ -453,6 +450,12 @@ impl Publish {
                                 command,
                                 command_dir: None,
                                 size: config.initial_size(),
+                                workspace: workspace.unwrap_or(
+                                    config
+                                        .default_workspace
+                                        .as_deref()
+                                        .unwrap_or(mux::DEFAULT_WORKSPACE)
+                                ).to_string(),
                             })
                             .await
                     }));
@@ -514,13 +517,25 @@ fn spawn_mux_server(unix_socket_path: PathBuf, should_publish: bool) -> anyhow::
     Ok(())
 }
 
-fn build_initial_mux(
+fn setup_mux(
+    local_domain: Arc<dyn Domain>,
     config: &ConfigHandle,
     default_domain_name: Option<&str>,
+    default_workspace_name: Option<&str>,
 ) -> anyhow::Result<Rc<Mux>> {
-    let domain: Arc<dyn Domain> = Arc::new(LocalDomain::new("local")?);
-    let mux = Rc::new(mux::Mux::new(Some(domain.clone())));
+    let mux = Rc::new(mux::Mux::new(Some(local_domain.clone())));
     Mux::set_mux(&mux);
+    let client_id = Arc::new(mux::client::ClientId::new());
+    mux.register_client(client_id.clone());
+    mux.replace_identity(Some(client_id));
+    mux.set_active_workspace(
+        default_workspace_name.unwrap_or(
+            config
+                .default_workspace
+                .as_deref()
+                .unwrap_or(mux::DEFAULT_WORKSPACE),
+        ),
+    );
     crate::update::load_last_release_info_and_set_banner();
     update_mux_domains(config)?;
 
@@ -536,6 +551,15 @@ fn build_initial_mux(
     mux.set_default_domain(&domain);
 
     Ok(mux)
+}
+
+fn build_initial_mux(
+    config: &ConfigHandle,
+    default_domain_name: Option<&str>,
+    default_workspace_name: Option<&str>,
+) -> anyhow::Result<Rc<Mux>> {
+    let domain: Arc<dyn Domain> = Arc::new(LocalDomain::new("local")?);
+    setup_mux(domain, config, default_domain_name, default_workspace_name)
 }
 
 fn run_terminal_gui(opts: StartCommand) -> anyhow::Result<()> {
@@ -561,14 +585,14 @@ fn run_terminal_gui(opts: StartCommand) -> anyhow::Result<()> {
         None
     };
 
-    let mux = build_initial_mux(&config, None)?;
+    let mux = build_initial_mux(&config, None, opts.workspace.as_deref())?;
 
     // First, let's see if we can ask an already running wezterm to do this.
     // We must do this before we start the gui frontend as the scheduler
     // requirements are different.
     let mut publish = Publish::resolve(&mux, &config, opts.always_new_process);
     log::trace!("{:?}", publish);
-    if publish.try_spawn(cmd.clone(), &config)? {
+    if publish.try_spawn(cmd.clone(), &config, opts.workspace.as_deref())? {
         return Ok(());
     }
 

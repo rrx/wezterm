@@ -187,11 +187,31 @@ Outputs the pane-id for the newly created pane on success"
         #[structopt(long = "cwd", parse(from_os_str))]
         cwd: Option<OsString>,
 
+        /// When creating a new window, override the default workspace name
+        /// with the provided name.  The default name is "default".
+        #[structopt(long = "workspace")]
+        workspace: Option<String>,
+
         /// Instead of executing your shell, run PROG.
         /// For example: `wezterm start -- bash -l` will spawn bash
         /// as if it were a login shell.
         #[structopt(parse(from_os_str))]
         prog: Vec<OsString>,
+    },
+
+    /// Send text to a pane as though it were pasted.
+    /// If bracketed paste mode is enabled in the pane, then the
+    /// text will be sent as a bracketed paste.
+    #[structopt(name = "send-text")]
+    SendText {
+        /// Specify the target pane.
+        /// The default is to use the current pane based on the
+        /// environment variable WEZTERM_PANE.
+        #[structopt(long = "pane-id")]
+        pane_id: Option<PaneId>,
+
+        /// The text to send. If omitted, will read the text from stdin.
+        text: Option<String>,
     },
 }
 
@@ -566,6 +586,33 @@ async fn run_cli_async(config: config::ConfigHandle, cli: CliCommand) -> anyhow:
             log::debug!("{:?}", spawned);
             println!("{}", spawned.pane_id);
         }
+        CliSubCommand::SendText { pane_id, text } => {
+            let pane_id: PaneId = match pane_id {
+                Some(p) => p,
+                None => std::env::var("WEZTERM_PANE")
+                    .map_err(|_| {
+                        anyhow!(
+                            "--pane-id was not specified and $WEZTERM_PANE \
+                             is not set in the environment."
+                        )
+                    })?
+                    .parse()?,
+            };
+            let data = match text {
+                Some(text) => text,
+                None => {
+                    let mut text = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut text)
+                        .context("reading stdin")?;
+                    text
+                }
+            };
+
+            client
+                .send_paste(codec::SendPaste { pane_id, data })
+                .await?;
+        }
         CliSubCommand::SpawnCommand {
             cwd,
             prog,
@@ -573,6 +620,7 @@ async fn run_cli_async(config: config::ConfigHandle, cli: CliCommand) -> anyhow:
             domain_name,
             window_id,
             new_window,
+            workspace,
         } => {
             let window_id = if new_window {
                 None
@@ -616,6 +664,8 @@ async fn run_cli_async(config: config::ConfigHandle, cli: CliCommand) -> anyhow:
                 }
             };
 
+            let workspace = workspace.unwrap_or_else(|| Mux::get().unwrap().active_workspace());
+
             let spawned = client
                 .spawn_v2(codec::SpawnV2 {
                     domain: domain_name.map_or(SpawnTabDomain::DefaultDomain, |name| {
@@ -630,6 +680,7 @@ async fn run_cli_async(config: config::ConfigHandle, cli: CliCommand) -> anyhow:
                     },
                     command_dir: canon_cwd(cwd)?,
                     size: config::configuration().initial_size(),
+                    workspace,
                 })
                 .await?;
 

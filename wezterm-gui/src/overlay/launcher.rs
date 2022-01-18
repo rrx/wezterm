@@ -18,6 +18,7 @@ use mux::tab::TabId;
 use mux::termwiztermtab::TermWizTerminal;
 use mux::window::WindowId;
 use mux::Mux;
+use std::collections::BTreeMap;
 use termwiz::cell::{AttributeChange, CellAttributes};
 use termwiz::color::ColorAttribute;
 use termwiz::input::{InputEvent, KeyCode, KeyEvent, MouseButtons, MouseEvent};
@@ -25,15 +26,7 @@ use termwiz::surface::{Change, Position};
 use termwiz::terminal::Terminal;
 use window::WindowOps;
 
-bitflags::bitflags! {
-    pub struct LauncherFlags :u32 {
-        const ZERO = 0;
-        const TABS = 2;
-        const LAUNCH_MENU_ITEMS = 4;
-        const DOMAINS = 8;
-        const KEY_ASSIGNMENTS = 16;
-    }
-}
+pub use config::keyassignment::LauncherFlags;
 
 #[derive(Clone)]
 enum EntryKind {
@@ -69,6 +62,8 @@ pub struct LauncherArgs {
     pane_id: PaneId,
     domain_id_of_current_tab: DomainId,
     title: String,
+    active_workspace: String,
+    workspaces: Vec<String>,
 }
 
 impl LauncherArgs {
@@ -81,6 +76,14 @@ impl LauncherArgs {
         domain_id_of_current_tab: DomainId,
     ) -> Self {
         let mux = Mux::get().unwrap();
+
+        let active_workspace = mux.active_workspace();
+
+        let workspaces = if flags.contains(LauncherFlags::WORKSPACES) {
+            mux.iter_workspaces()
+        } else {
+            vec![]
+        };
 
         let tabs = if flags.contains(LauncherFlags::TABS) {
             // Ideally we'd resolve the tabs on the fly once we've started the
@@ -152,12 +155,17 @@ impl LauncherArgs {
             pane_id,
             domain_id_of_current_tab,
             title: title.to_string(),
+            workspaces,
+            active_workspace,
         }
     }
 }
 
+const ROW_OVERHEAD: usize = 3;
+
 struct LauncherState {
     active_idx: usize,
+    max_items: usize,
     top_row: usize,
     entries: Vec<Entry>,
     filter_term: String,
@@ -165,6 +173,7 @@ struct LauncherState {
     pane_id: PaneId,
     window: ::window::Window,
     filtering: bool,
+    flags: LauncherFlags,
 }
 
 impl LauncherState {
@@ -254,6 +263,30 @@ impl LauncherState {
             self.entries.push(entry);
         }
 
+        if args.flags.contains(LauncherFlags::WORKSPACES) {
+            for ws in &args.workspaces {
+                if *ws != args.active_workspace {
+                    self.entries.push(Entry {
+                        label: format!("Switch to workspace: `{}`", ws),
+                        kind: EntryKind::KeyAssignment(KeyAssignment::SwitchToWorkspace {
+                            name: Some(ws.clone()),
+                            spawn: None,
+                        }),
+                    });
+                }
+            }
+            self.entries.push(Entry {
+                label: format!(
+                    "Create new Workspace (current is `{}`)",
+                    args.active_workspace
+                ),
+                kind: EntryKind::KeyAssignment(KeyAssignment::SwitchToWorkspace {
+                    name: None,
+                    spawn: None,
+                }),
+            });
+        }
+
         for tab in &args.tabs {
             self.entries.push(Entry {
                 label: format!("{}. {} panes", tab.title, tab.pane_count),
@@ -265,7 +298,9 @@ impl LauncherState {
         if args.flags.contains(LauncherFlags::KEY_ASSIGNMENTS) {
             let input_map = InputMap::new(&config);
             let mut key_entries: Vec<Entry> = vec![];
-            for ((keycode, mods), assignment) in input_map.keys {
+            // Give a consistent order to the entries
+            let keys: BTreeMap<_, _> = input_map.keys.into_iter().collect();
+            for ((keycode, mods), assignment) in keys {
                 if matches!(
                     &assignment,
                     KeyAssignment::ActivateTabRelative(_) | KeyAssignment::ActivateTab(_)
@@ -320,23 +355,13 @@ impl LauncherState {
             Change::AllAttributes(CellAttributes::default()),
         ];
 
-        let max_items = size.rows - 3;
-        let num_items = self.filtered_entries.len();
-
-        let skip = if num_items < max_items {
-            0
-        } else if num_items - self.active_idx < max_items {
-            // Align to bottom
-            (num_items - max_items).saturating_sub(1)
-        } else {
-            self.active_idx.saturating_sub(2)
-        };
+        let max_items = self.max_items;
 
         for (row_num, (entry_idx, entry)) in self
             .filtered_entries
             .iter()
             .enumerate()
-            .skip(skip)
+            .skip(self.top_row)
             .enumerate()
         {
             if row_num > max_items {
@@ -357,7 +382,6 @@ impl LauncherState {
                 changes.push(AttributeChange::Reverse(false).into());
             }
         }
-        self.top_row = skip;
 
         if self.filtering || !self.filter_term.is_empty() {
             changes.append(&mut vec![
@@ -398,10 +422,16 @@ impl LauncherState {
 
     fn move_up(&mut self) {
         self.active_idx = self.active_idx.saturating_sub(1);
+        if self.active_idx < self.top_row {
+            self.top_row = self.active_idx;
+        }
     }
 
     fn move_down(&mut self) {
         self.active_idx = (self.active_idx + 1).min(self.filtered_entries.len() - 1);
+        if self.active_idx + self.top_row > self.max_items {
+            self.top_row = self.active_idx.saturating_sub(self.max_items);
+        }
     }
 
     fn run_loop(&mut self, term: &mut TermWizTerminal) -> anyhow::Result<()> {
@@ -436,7 +466,9 @@ impl LauncherState {
                     key: KeyCode::Backspace,
                     ..
                 }) => {
-                    if self.filter_term.pop().is_none() {
+                    if self.filter_term.pop().is_none()
+                        && !self.flags.contains(LauncherFlags::FUZZY)
+                    {
                         self.filtering = false;
                     }
                     self.update_filter();
@@ -468,6 +500,24 @@ impl LauncherState {
                 }
                 InputEvent::Mouse(MouseEvent {
                     y, mouse_buttons, ..
+                }) if mouse_buttons.contains(MouseButtons::VERT_WHEEL) => {
+                    if mouse_buttons.contains(MouseButtons::WHEEL_POSITIVE) {
+                        self.top_row = self.top_row.saturating_sub(1);
+                    } else {
+                        self.top_row += 1;
+                        self.top_row = self.top_row.min(
+                            self.filtered_entries
+                                .len()
+                                .saturating_sub(self.max_items)
+                                .saturating_sub(1),
+                        );
+                    }
+                    if y > 0 && y as usize <= self.filtered_entries.len() {
+                        self.active_idx = self.top_row + y as usize - 1;
+                    }
+                }
+                InputEvent::Mouse(MouseEvent {
+                    y, mouse_buttons, ..
                 }) => {
                     if y > 0 && y as usize <= self.filtered_entries.len() {
                         self.active_idx = self.top_row + y as usize - 1;
@@ -489,6 +539,9 @@ impl LauncherState {
                     self.launch(self.active_idx);
                     break;
                 }
+                InputEvent::Resized { rows, .. } => {
+                    self.max_items = rows.saturating_sub(ROW_OVERHEAD);
+                }
                 _ => {}
             }
             self.render(term)?;
@@ -503,15 +556,19 @@ pub fn launcher(
     mut term: TermWizTerminal,
     window: ::window::Window,
 ) -> anyhow::Result<()> {
+    let size = term.get_screen_size()?;
+    let max_items = size.rows.saturating_sub(ROW_OVERHEAD);
     let mut state = LauncherState {
         active_idx: 0,
+        max_items,
         pane_id: args.pane_id,
         top_row: 0,
         entries: vec![],
         filter_term: String::new(),
         filtered_entries: vec![],
         window,
-        filtering: false,
+        filtering: args.flags.contains(LauncherFlags::FUZZY),
+        flags: args.flags,
     };
 
     term.set_raw_mode()?;

@@ -239,10 +239,12 @@ impl Pane for LocalPane {
     }
 
     fn mouse_event(&self, event: MouseEvent) -> Result<(), Error> {
+        Mux::get().unwrap().record_input_for_current_identity();
         self.terminal.borrow_mut().mouse_event(event)
     }
 
     fn key_down(&self, key: KeyCode, mods: KeyModifiers) -> Result<(), Error> {
+        Mux::get().unwrap().record_input_for_current_identity();
         if self.tmux_domain.borrow().is_some() {
             log::error!("key: {:?}", key);
             if key == KeyCode::Char('q') {
@@ -255,6 +257,7 @@ impl Pane for LocalPane {
     }
 
     fn key_up(&self, key: KeyCode, mods: KeyModifiers) -> Result<(), Error> {
+        Mux::get().unwrap().record_input_for_current_identity();
         self.terminal.borrow_mut().key_up(key, mods)
     }
 
@@ -270,6 +273,7 @@ impl Pane for LocalPane {
     }
 
     fn writer(&self) -> RefMut<dyn std::io::Write> {
+        Mux::get().unwrap().record_input_for_current_identity();
         self.pty.borrow_mut()
     }
 
@@ -278,6 +282,7 @@ impl Pane for LocalPane {
     }
 
     fn send_paste(&self, text: &str) -> Result<(), Error> {
+        Mux::get().unwrap().record_input_for_current_identity();
         if self.tmux_domain.borrow().is_some() {
             Ok(())
         } else {
@@ -648,14 +653,17 @@ impl wezterm_term::DeviceControlHandler for LocalPaneDCSHandler {
                 }
             }
             DeviceControlMode::Data(c) => {
+                log::warn!(
+                    "unhandled DeviceControlMode::Data {:x} {}",
+                    c,
+                    (c as char).escape_debug()
+                );
+            }
+            DeviceControlMode::TmuxEvents(events) => {
                 if let Some(tmux) = self.tmux_domain.as_ref() {
-                    tmux.advance(c);
+                    tmux.advance(events);
                 } else {
-                    log::warn!(
-                        "unhandled DeviceControlMode::Data {:x} {}",
-                        c,
-                        (c as char).escape_debug()
-                    );
+                    log::warn!("unhandled DeviceControlMode::TmuxEvents {:?}", &events);
                 }
             }
             _ => {

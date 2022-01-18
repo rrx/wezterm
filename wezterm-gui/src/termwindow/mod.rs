@@ -2,6 +2,7 @@
 use super::renderstate::*;
 use super::utilsprites::RenderMetrics;
 use crate::cache::LruCache;
+use crate::frontend::front_end;
 use crate::glium::texture::SrgbTexture2d;
 use crate::overlay::{
     confirm_close_pane, confirm_close_tab, confirm_close_window, confirm_quit_program, launcher,
@@ -16,8 +17,7 @@ use crate::shapecache::*;
 use crate::tabbar::{TabBarItem, TabBarState};
 use ::wezterm_term::input::MouseButton as TMB;
 use ::window::*;
-use anyhow::Context;
-use anyhow::{anyhow, ensure};
+use anyhow::{anyhow, ensure, Context};
 use config::keyassignment::{
     ClipboardCopyDestination, ClipboardPasteSource, InputMap, KeyAssignment, QuickSelectArguments,
     SpawnCommand,
@@ -108,6 +108,7 @@ pub enum TermWindowNotif {
     MuxNotification(MuxNotification),
     EmitStatusUpdate,
     Apply(Box<dyn FnOnce(&mut TermWindow) + Send + Sync>),
+    SwitchToMuxWindow(MuxWindowId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -345,6 +346,7 @@ impl TermWindow {
                 // Immediately kill the tabs and allow the window to close
                 mux.kill_window(self.mux_window_id);
                 window.close();
+                front_end().forget_known_window(window);
             }
             WindowCloseConfirmation::AlwaysPrompt => {
                 let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
@@ -352,6 +354,7 @@ impl TermWindow {
                     None => {
                         mux.kill_window(self.mux_window_id);
                         window.close();
+                        front_end().forget_known_window(window);
                         return;
                     }
                 };
@@ -364,6 +367,7 @@ impl TermWindow {
                 if can_close {
                     mux.kill_window(self.mux_window_id);
                     window.close();
+                    front_end().forget_known_window(window);
                     return;
                 }
                 let window = self.window.clone().unwrap();
@@ -772,6 +776,7 @@ impl TermWindow {
         }
 
         crate::update::start_update_checker();
+        front_end().record_known_window(window, mux_window_id);
         Ok(())
     }
 
@@ -844,6 +849,7 @@ impl TermWindow {
         if gl.is_context_lost() {
             log::error!("opengl context was lost; should reinit");
             window.close();
+            front_end().forget_known_window(window);
             return false;
         }
 
@@ -956,10 +962,8 @@ impl TermWindow {
                 MuxNotification::WindowInvalidated(_) => {
                     window.invalidate();
                 }
-                MuxNotification::WindowRemoved(window_id) => {
-                    if window_id == self.mux_window_id {
-                        window.close();
-                    }
+                MuxNotification::WindowRemoved(_window_id) => {
+                    // Handled by frontend
                 }
                 _ => {}
             },
@@ -978,6 +982,22 @@ impl TermWindow {
             }
             TermWindowNotif::Apply(func) => {
                 func(self);
+            }
+            TermWindowNotif::SwitchToMuxWindow(mux_window_id) => {
+                self.mux_window_id = mux_window_id;
+                self.pane_state.borrow_mut().clear();
+                self.tab_state.borrow_mut().clear();
+                self.current_highlight.take();
+                self.invalidate_fancy_tab_bar();
+
+                let mux = Mux::get().expect("to be main thread with mux running");
+                if let Some(window) = mux.get_window(self.mux_window_id) {
+                    for tab in window.iter() {
+                        tab.resize(self.terminal_size);
+                    }
+                };
+                self.update_title();
+                window.invalidate();
             }
         }
 
@@ -1670,6 +1690,7 @@ impl TermWindow {
         self.show_launcher_impl(
             "Launcher",
             LauncherFlags::LAUNCH_MENU_ITEMS
+                | LauncherFlags::WORKSPACES
                 | LauncherFlags::DOMAINS
                 | LauncherFlags::KEY_ASSIGNMENTS,
         );
@@ -1933,6 +1954,9 @@ impl TermWindow {
             ShowTabNavigator => self.show_tab_navigator(),
             ShowDebugOverlay => self.show_debug_overlay(),
             ShowLauncher => self.show_launcher(),
+            ShowLauncherArgs(args) => {
+                self.show_launcher_impl(args.title.as_deref().unwrap_or("Launcher"), args.flags)
+            }
             HideApplication => {
                 let con = Connection::get().expect("call on gui thread");
                 con.hide_application();
@@ -2074,6 +2098,62 @@ impl TermWindow {
                     None => return Ok(()),
                 };
                 tab.toggle_zoom();
+            }
+            SwitchWorkspaceRelative(delta) => {
+                let mux = Mux::get().unwrap();
+                let workspace = mux.active_workspace();
+                let workspaces = mux.iter_workspaces();
+                let idx = workspaces.iter().position(|w| *w == workspace).unwrap_or(0);
+                let new_idx = idx as isize + delta;
+                let new_idx = if new_idx < 0 {
+                    workspaces.len() as isize + new_idx
+                } else {
+                    new_idx
+                };
+                let new_idx = new_idx as usize % workspaces.len();
+                if let Some(w) = workspaces.get(new_idx) {
+                    front_end().switch_workspace(w);
+                }
+            }
+            SwitchToWorkspace { name, spawn } => {
+                let activity = crate::Activity::new();
+                let mux = Mux::get().unwrap();
+                let name = name
+                    .as_ref()
+                    .map(|name| name.to_string())
+                    .unwrap_or_else(|| mux.generate_workspace_name());
+                let switcher = crate::frontend::WorkspaceSwitcher::new(&name);
+                mux.set_active_workspace(&name);
+
+                if mux.iter_windows_in_workspace(&name).is_empty() {
+                    let spawn = spawn.as_ref().map(|s| s.clone()).unwrap_or_default();
+                    let size = self.terminal_size;
+                    let term_config = Arc::new(TermConfig::with_config(self.config.clone()));
+                    let src_window_id = self.mux_window_id;
+                    let clipboard = ClipboardHelper {
+                        window: self.window.as_ref().unwrap().clone(),
+                    };
+
+                    promise::spawn::spawn(async move {
+                        if let Err(err) = Self::spawn_command_internal(
+                            spawn,
+                            SpawnWhere::NewWindow,
+                            size,
+                            src_window_id,
+                            clipboard,
+                            term_config,
+                        )
+                        .await
+                        {
+                            log::error!("Failed to spawn: {:#}", err);
+                        }
+                        switcher.do_switch();
+                        drop(activity);
+                    })
+                    .detach();
+                } else {
+                    switcher.do_switch();
+                }
             }
         };
         Ok(())
@@ -2477,5 +2557,13 @@ impl TermWindow {
             }
         }
         self.update_title();
+    }
+}
+
+impl Drop for TermWindow {
+    fn drop(&mut self) {
+        if let Some(window) = self.window.take() {
+            front_end().forget_known_window(&window);
+        }
     }
 }

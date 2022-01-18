@@ -6,7 +6,7 @@
 use crate::domain::{alloc_domain_id, Domain, DomainId, DomainState};
 use crate::pane::{alloc_pane_id, CloseReason, Pane, PaneId};
 use crate::renderable::*;
-use crate::tab::{SplitDirection, Tab, TabId};
+use crate::tab::Tab;
 use crate::window::WindowId;
 use crate::Mux;
 use anyhow::bail;
@@ -16,10 +16,8 @@ use crossbeam::channel::{unbounded as channel, Receiver, Sender};
 use filedescriptor::{FileDescriptor, Pipe};
 use portable_pty::*;
 use rangeset::RangeSet;
-use std::cell::RefCell;
-use std::cell::RefMut;
-use std::io::BufWriter;
-use std::io::Write;
+use std::cell::{RefCell, RefMut};
+use std::io::{BufWriter, Write};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -46,22 +44,11 @@ impl TermWizTerminalDomain {
 
 #[async_trait(?Send)]
 impl Domain for TermWizTerminalDomain {
-    async fn spawn(
+    async fn spawn_pane(
         &self,
         _size: PtySize,
         _command: Option<CommandBuilder>,
         _command_dir: Option<String>,
-        _window: WindowId,
-    ) -> anyhow::Result<Rc<Tab>> {
-        bail!("cannot spawn tabs in a TermWizTerminalPane");
-    }
-    async fn split_pane(
-        &self,
-        _command: Option<CommandBuilder>,
-        _command_dir: Option<String>,
-        _tab: TabId,
-        _pane_id: PaneId,
-        _split_direction: SplitDirection,
     ) -> anyhow::Result<Rc<dyn Pane>> {
         bail!("cannot spawn panes in a TermWizTerminalPane");
     }
@@ -492,7 +479,7 @@ pub async fn run<
         let domain: Arc<dyn Domain> = Arc::new(TermWizTerminalDomain::new());
         mux.add_domain(&domain);
 
-        let window_id = mux.new_empty_window();
+        let window_id = mux.new_empty_window(None);
 
         let pane = TermWizTerminalPane::new(domain.domain_id(), size, input_tx, render_rx);
         let pane: Rc<dyn Pane> = Rc::new(pane);

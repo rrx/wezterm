@@ -6,11 +6,10 @@ use ::window::bitmaps::atlas::{Atlas, OutOfTextureSpace, Sprite};
 use ::window::bitmaps::ImageTexture;
 use ::window::bitmaps::{BitmapImage, Image, Texture2d};
 use ::window::color::SrgbaPixel;
-use ::window::glium;
 use ::window::glium::backend::Context as GliumContext;
 use ::window::glium::texture::SrgbTexture2d;
 use ::window::glium::CapabilitiesSource;
-use ::window::{Point, Rect};
+use ::window::{glium, Point, Rect};
 use anyhow::Context;
 use config::{AllowSquareGlyphOverflow, TextStyle};
 use euclid::num::Zero;
@@ -254,7 +253,7 @@ pub struct GlyphCache<T: Texture2d> {
     frame_cache: HashMap<[u8; 32], Sprite<T>>,
     line_glyphs: HashMap<LineKey, Sprite<T>>,
     pub block_glyphs: HashMap<SizedBlockKey, Sprite<T>>,
-    pub cursor_glyphs: HashMap<Option<CursorShape>, Sprite<T>>,
+    pub cursor_glyphs: HashMap<(Option<CursorShape>, u8), Sprite<T>>,
     pub color: HashMap<(RgbColor, NotNan<f32>), Sprite<T>>,
 }
 

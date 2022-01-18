@@ -2,7 +2,7 @@ use crate::client::Client;
 use crate::pane::ClientPane;
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
-use codec::{ListPanesResponse, Spawn, SplitPane};
+use codec::{ListPanesResponse, SpawnV2, SplitPane};
 use config::keyassignment::SpawnTabDomain;
 use config::{SshDomain, TlsDomainClient, UnixDomain};
 use mux::connui::ConnectionUI;
@@ -196,6 +196,9 @@ fn mux_notify_client_domain(local_domain_id: DomainId, notif: MuxNotification) -
         None => return false,
     };
     match notif {
+        MuxNotification::ActiveWorkspaceChanged(_client_id) => {
+            // TODO: advice remote host of interesting workspaces
+        }
         MuxNotification::WindowWorkspaceChanged(window_id) => {
             if let Some(remote_window_id) = domain.local_to_remote_window_id(window_id) {
                 if let Some(workspace) = mux
@@ -334,7 +337,9 @@ impl ClientDomain {
                 }
 
                 log::debug!("tree: {:#?}", tabroot);
+                let mut workspace = None;
                 tab.sync_with_pane_tree(root_size, tabroot, |entry| {
+                    workspace.replace(entry.workspace.clone());
                     if let Some(pane_id) = inner.remote_to_local_pane_id(entry.pane_id) {
                         match mux.get_pane(pane_id) {
                             Some(pane) => pane,
@@ -380,7 +385,7 @@ impl ClientDomain {
                         window.push(&tab);
                     }
                 } else {
-                    let local_window_id = mux.new_empty_window();
+                    let local_window_id = mux.new_empty_window(workspace.take());
                     inner.record_remote_to_local_window_mapping(remote_window_id, *local_window_id);
                     mux.add_tab_to_window(&tab, *local_window_id)?;
                 }
@@ -426,6 +431,15 @@ impl Domain for ClientDomain {
         &self.label
     }
 
+    async fn spawn_pane(
+        &self,
+        _size: PtySize,
+        _command: Option<CommandBuilder>,
+        _command_dir: Option<String>,
+    ) -> anyhow::Result<Rc<dyn Pane>> {
+        anyhow::bail!("spawn_pane not implemented for ClientDomain")
+    }
+
     async fn spawn(
         &self,
         size: PtySize,
@@ -436,14 +450,18 @@ impl Domain for ClientDomain {
         let inner = self
             .inner()
             .ok_or_else(|| anyhow!("domain is not attached"))?;
+
+        let workspace = Mux::get().unwrap().active_workspace();
+
         let result = inner
             .client
-            .spawn(Spawn {
-                domain_id: inner.remote_domain_id,
+            .spawn_v2(SpawnV2 {
+                domain: SpawnTabDomain::DomainId(inner.remote_domain_id),
                 window_id: inner.local_to_remote_window(window),
                 size,
                 command,
                 command_dir,
+                workspace,
             })
             .await?;
 

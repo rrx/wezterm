@@ -2,8 +2,7 @@ use crate::terminal::Alert;
 use crate::terminalstate::{
     default_color_map, CharSet, MouseEncoding, TabStop, UnicodeVersionStackEntry,
 };
-use crate::{ClipboardSelection, Position, TerminalState, VisibleRowIndex};
-use crate::{DCS, ST};
+use crate::{ClipboardSelection, Position, TerminalState, VisibleRowIndex, DCS, ST};
 use log::{debug, error};
 use num_traits::FromPrimitive;
 use std::fmt::Write;
@@ -279,7 +278,11 @@ impl<'a> Performer<'a> {
     /// Draw a character to the screen
     fn print(&mut self, c: char) {
         // We buffer up the chars to increase the chances of correctly grouping graphemes into cells
-        self.print.push(c);
+        if let Some(title) = self.accumulating_title.as_mut() {
+            title.push(c);
+        } else {
+            self.print.push(c);
+        }
     }
 
     fn control(&mut self, control: ControlCode) {
@@ -305,6 +308,7 @@ impl<'a> Performer<'a> {
                 }
                 if self.newline_mode {
                     self.cursor.x = 0;
+                    self.clear_semantic_attribute_due_to_movement();
                 }
             }
             ControlCode::CarriageReturn => {
@@ -315,6 +319,7 @@ impl<'a> Performer<'a> {
                 }
                 let y = self.cursor.y;
                 self.wrap_next = false;
+                self.clear_semantic_attribute_due_to_movement();
                 self.screen_mut().dirty_line(y, seqno);
             }
 
@@ -418,8 +423,14 @@ impl<'a> Performer<'a> {
         self.flush_print();
         match esc {
             Esc::Code(EscCode::StringTerminator) => {
-                // String Terminator (ST); explicitly has nothing to do here, as its purpose is
+                // String Terminator (ST); for the most part has nothing to do here, as its purpose is
                 // handled implicitly through a state transition in the vtparse state tables.
+                if let Some(title) = self.accumulating_title.take() {
+                    self.osc_dispatch(OperatingSystemCommand::SetIconNameAndWindowTitle(title));
+                }
+            }
+            Esc::Code(EscCode::TmuxTitle) => {
+                self.accumulating_title.replace(String::new());
             }
             Esc::Code(EscCode::DecApplicationKeyPad) => {
                 debug!("DECKPAM on");
@@ -503,6 +514,7 @@ impl<'a> Performer<'a> {
                 self.pen = Default::default();
                 self.cursor = Default::default();
                 self.wrap_next = false;
+                self.clear_semantic_attribute_on_newline = false;
                 self.insert = false;
                 self.dec_auto_wrap = true;
                 self.reverse_wraparound_mode = false;
@@ -534,6 +546,7 @@ impl<'a> Performer<'a> {
                 self.unicode_version = UnicodeVersion(self.config.unicode_version());
                 self.unicode_version_stack.clear();
                 self.suppress_initial_title_change = false;
+                self.accumulating_title.take();
 
                 self.screen.activate_primary_screen(seqno);
                 self.erase_in_display(EraseInDisplay::EraseScrollback);
@@ -658,6 +671,12 @@ impl<'a> Performer<'a> {
                 self.pen.set_semantic_type(SemanticType::Input);
             }
             OperatingSystemCommand::FinalTermSemanticPrompt(
+                FinalTermSemanticPrompt::MarkEndOfPromptAndStartOfInputUntilEndOfLine { .. },
+            ) => {
+                self.pen.set_semantic_type(SemanticType::Input);
+                self.clear_semantic_attribute_on_newline = true;
+            }
+            OperatingSystemCommand::FinalTermSemanticPrompt(
                 FinalTermSemanticPrompt::MarkEndOfInputAndStartOfOutput { .. },
             ) => {
                 self.pen.set_semantic_type(SemanticType::Output);
@@ -666,10 +685,6 @@ impl<'a> Performer<'a> {
             OperatingSystemCommand::FinalTermSemanticPrompt(
                 FinalTermSemanticPrompt::CommandStatus { .. },
             ) => {}
-
-            OperatingSystemCommand::FinalTermSemanticPrompt(ft) => {
-                log::warn!("unhandled: {:?}", ft);
-            }
 
             OperatingSystemCommand::SystemNotification(message) => {
                 if let Some(handler) = self.alert_handler.as_mut() {

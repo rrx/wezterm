@@ -1,14 +1,88 @@
-use crate::de_notnan;
 use crate::keys::KeyNoAction;
-use crate::ConfigHandle;
-use crate::LeaderKey;
+use crate::{de_notnan, ConfigHandle, LeaderKey};
 use luahelper::impl_lua_conversion;
 use ordered_float::NotNan;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::path::PathBuf;
 use wezterm_input_types::{KeyCode, Modifiers, PhysKeyCode};
 use wezterm_term::input::MouseButton;
+
+#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LauncherActionArgs {
+    pub flags: LauncherFlags,
+    pub title: Option<String>,
+}
+
+bitflags::bitflags! {
+    #[derive(Default, Deserialize, Serialize)]
+    #[serde(try_from="String", into="String")]
+    pub struct LauncherFlags :u32 {
+        const ZERO = 0;
+        const FUZZY = 1;
+        const TABS = 2;
+        const LAUNCH_MENU_ITEMS = 4;
+        const DOMAINS = 8;
+        const KEY_ASSIGNMENTS = 16;
+        const WORKSPACES = 32;
+    }
+}
+
+impl Into<String> for LauncherFlags {
+    fn into(self) -> String {
+        self.to_string()
+    }
+}
+
+impl ToString for LauncherFlags {
+    fn to_string(&self) -> String {
+        let mut s = vec![];
+        if self.contains(Self::FUZZY) {
+            s.push("FUZZY");
+        }
+        if self.contains(Self::TABS) {
+            s.push("TABS");
+        }
+        if self.contains(Self::LAUNCH_MENU_ITEMS) {
+            s.push("LAUNCH_MENU_ITEMS");
+        }
+        if self.contains(Self::DOMAINS) {
+            s.push("DOMAINS");
+        }
+        if self.contains(Self::KEY_ASSIGNMENTS) {
+            s.push("KEY_ASSIGNMENTS");
+        }
+        if self.contains(Self::WORKSPACES) {
+            s.push("WORKSPACES");
+        }
+        s.join("|")
+    }
+}
+
+impl TryFrom<String> for LauncherFlags {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, String> {
+        let mut flags = LauncherFlags::default();
+
+        for ele in s.split('|') {
+            let ele = ele.trim();
+            match ele {
+                "FUZZY" => flags |= Self::FUZZY,
+                "TABS" => flags |= Self::TABS,
+                "LAUNCH_MENU_ITEMS" => flags |= Self::LAUNCH_MENU_ITEMS,
+                "DOMAINS" => flags |= Self::DOMAINS,
+                "KEY_ASSIGNMENTS" => flags |= Self::KEY_ASSIGNMENTS,
+                "WORKSPACES" => flags |= Self::WORKSPACES,
+                _ => {
+                    return Err(format!("invalid LauncherFlags `{}` in `{}`", ele, s));
+                }
+            }
+        }
+
+        Ok(flags)
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SelectionMode {
@@ -70,6 +144,8 @@ pub enum SpawnTabDomain {
     CurrentPaneDomain,
     /// Use a specific domain by name
     DomainName(String),
+    /// Use a specific domain by id
+    DomainId(usize),
 }
 
 impl Default for SpawnTabDomain {
@@ -239,6 +315,7 @@ pub enum KeyAssignment {
     SplitHorizontal(SpawnCommand),
     SplitVertical(SpawnCommand),
     ShowLauncher,
+    ShowLauncherArgs(LauncherActionArgs),
     ClearScrollback(ScrollbackEraseMode),
     Search(Pattern),
     ActivateCopyMode,
@@ -262,6 +339,12 @@ pub enum KeyAssignment {
     QuickSelectArgs(QuickSelectArguments),
 
     Multiple(Vec<KeyAssignment>),
+
+    SwitchToWorkspace {
+        name: Option<String>,
+        spawn: Option<SpawnCommand>,
+    },
+    SwitchWorkspaceRelative(isize),
 }
 impl_lua_conversion!(KeyAssignment);
 
@@ -570,51 +653,6 @@ impl InputMap {
                     Modifiers::SHIFT,
                     KeyCode::Physical(PhysKeyCode::PageDown),
                     ScrollByPage(NotNan::new(1.0).unwrap())
-                ],
-                [
-                    Modifiers::ALT,
-                    KeyCode::Physical(PhysKeyCode::K1),
-                    ActivateTab(0)
-                ],
-                [
-                    Modifiers::ALT,
-                    KeyCode::Physical(PhysKeyCode::K2),
-                    ActivateTab(1)
-                ],
-                [
-                    Modifiers::ALT,
-                    KeyCode::Physical(PhysKeyCode::K3),
-                    ActivateTab(2)
-                ],
-                [
-                    Modifiers::ALT,
-                    KeyCode::Physical(PhysKeyCode::K4),
-                    ActivateTab(3)
-                ],
-                [
-                    Modifiers::ALT,
-                    KeyCode::Physical(PhysKeyCode::K5),
-                    ActivateTab(4)
-                ],
-                [
-                    Modifiers::ALT,
-                    KeyCode::Physical(PhysKeyCode::K6),
-                    ActivateTab(5)
-                ],
-                [
-                    Modifiers::ALT,
-                    KeyCode::Physical(PhysKeyCode::K7),
-                    ActivateTab(6)
-                ],
-                [
-                    Modifiers::ALT,
-                    KeyCode::Physical(PhysKeyCode::K8),
-                    ActivateTab(7)
-                ],
-                [
-                    Modifiers::ALT,
-                    KeyCode::Physical(PhysKeyCode::K9),
-                    ShowTabNavigator
                 ],
                 [
                     ctrl_shift,

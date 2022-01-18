@@ -1,10 +1,9 @@
 use super::*;
 use crate::connection::ConnectionOps;
-use crate::Appearance;
 use crate::{
-    Clipboard, DeadKeyStatus, Dimensions, Handled, KeyCode, KeyEvent, Modifiers, MouseButtons,
-    MouseCursor, MouseEvent, MouseEventKind, MousePress, Point, RawKeyEvent, Rect, ScreenPoint,
-    WindowDecorations, WindowEvent, WindowEventSender, WindowOps, WindowState,
+    Appearance, Clipboard, DeadKeyStatus, Dimensions, Handled, KeyCode, KeyEvent, Modifiers,
+    MouseButtons, MouseCursor, MouseEvent, MouseEventKind, MousePress, Point, RawKeyEvent, Rect,
+    ScreenPoint, WindowDecorations, WindowEvent, WindowEventSender, WindowOps, WindowState,
 };
 use anyhow::{bail, Context};
 use async_trait::async_trait;
@@ -35,7 +34,8 @@ use winapi::um::uxtheme::{
 };
 use winapi::um::wingdi::LOGFONTW;
 use winapi::um::winuser::*;
-use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+use winreg::enums::HKEY_CURRENT_USER;
+use winreg::RegKey;
 
 const GCS_RESULTSTR: DWORD = 0x800;
 const GCS_COMPSTR: DWORD = 0x8;
@@ -43,7 +43,7 @@ extern "system" {
     pub fn ImmGetCompositionStringW(himc: HIMC, index: DWORD, buf: LPVOID, buflen: DWORD) -> LONG;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub(crate) struct HWindow(HWND);
 unsafe impl Send for HWindow {}
 unsafe impl Sync for HWindow {}
@@ -68,7 +68,7 @@ pub(crate) struct WindowInner {
     config: ConfigHandle,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Window(HWindow);
 
 fn rect_width(r: &RECT) -> i32 {

@@ -223,7 +223,7 @@ impl PendingEvent {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct WaylandWindow(usize);
 
 impl WaylandWindow {

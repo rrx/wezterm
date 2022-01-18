@@ -24,8 +24,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::marker::Unpin;
 use std::net::TcpStream;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 use thiserror::Error;
@@ -1137,7 +1136,6 @@ impl Client {
 
     rpc!(ping, Ping = (), Pong);
     rpc!(list_panes, ListPanes = (), ListPanesResponse);
-    rpc!(spawn, Spawn, SpawnResponse);
     rpc!(spawn_v2, SpawnV2, SpawnResponse);
     rpc!(split_pane, SplitPane, SpawnResponse);
     rpc!(write_to_pane, WriteToPane, UnitResponse);

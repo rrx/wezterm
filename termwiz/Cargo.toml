@@ -26,6 +26,8 @@ log = "0.4"
 memmem = "0.1"
 num-traits = "0.2"
 ordered-float = "2.10"
+pest = "2.1"
+pest_derive = "2.1"
 regex = "1"
 semver = "0.11"
 serde = {version="1.0", features = ["rc", "derive"], optional=true}
@@ -45,6 +47,7 @@ docs = ["widgets", "use_serde"]
 [dev-dependencies]
 varbincode = "0.1"
 pretty_assertions = "0.6"
+pretty_env_logger = "0.4"
 
 [dependencies.num-derive]
 features = ["full-syntax"]
