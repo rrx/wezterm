@@ -48,7 +48,7 @@ use termwiz::surface::SequenceNo;
 use wezterm_font::FontConfiguration;
 use wezterm_term::color::ColorPalette;
 use wezterm_term::input::LastMouseClick;
-use wezterm_term::{Alert, SemanticZone, StableRowIndex, TerminalConfiguration};
+use wezterm_term::{Alert, StableRowIndex, TerminalConfiguration};
 
 pub mod box_model;
 pub mod clipboard;
@@ -142,7 +142,7 @@ impl UIItem {
 #[derive(Clone, Default)]
 pub struct SemanticZoneCache {
     seqno: SequenceNo,
-    zones: Vec<SemanticZone>,
+    zones: Vec<StableRowIndex>,
 }
 
 #[derive(Default, Clone)]
@@ -181,6 +181,18 @@ impl UserData for TabInformation {
                 Ok(None)
             }
         });
+        fields.add_field_method_get("panes", |_, this| {
+            let mux = Mux::get().expect("event to run on main thread");
+            let mut panes = vec![];
+            if let Some(tab) = mux.get_tab(this.tab_id) {
+                panes = tab
+                    .iter_panes()
+                    .iter()
+                    .map(TermWindow::pos_pane_to_pane_info)
+                    .collect();
+            }
+            Ok(panes)
+        });
     }
 }
 
@@ -191,6 +203,7 @@ pub struct PaneInformation {
     pub pane_index: usize,
     pub is_active: bool,
     pub is_zoomed: bool,
+    pub has_unseen_output: bool,
     pub left: usize,
     pub top: usize,
     pub width: usize,
@@ -207,6 +220,7 @@ impl UserData for PaneInformation {
         fields.add_field_method_get("pane_index", |_, this| Ok(this.pane_index));
         fields.add_field_method_get("is_active", |_, this| Ok(this.is_active));
         fields.add_field_method_get("is_zoomed", |_, this| Ok(this.is_zoomed));
+        fields.add_field_method_get("has_unseen_output", |_, this| Ok(this.has_unseen_output));
         fields.add_field_method_get("left", |_, this| Ok(this.left));
         fields.add_field_method_get("top", |_, this| Ok(this.top));
         fields.add_field_method_get("width", |_, this| Ok(this.width));
@@ -927,7 +941,10 @@ impl TermWindow {
             }
             TermWindowNotif::MuxNotification(n) => match n {
                 MuxNotification::Alert {
-                    alert: Alert::TitleMaybeChanged | Alert::SetUserVar { .. },
+                    alert:
+                        Alert::OutputSinceFocusLost
+                        | Alert::TitleMaybeChanged
+                        | Alert::SetUserVar { .. },
                     ..
                 } => {
                     self.update_title();
@@ -956,6 +973,10 @@ impl TermWindow {
                     per_pane.bell_start.replace(Instant::now());
                     window.invalidate();
                 }
+                MuxNotification::Alert {
+                    alert: Alert::ToastNotification { .. },
+                    ..
+                } => {}
                 MuxNotification::PaneOutput(pane_id) => {
                     self.mux_pane_output_event(pane_id);
                 }
@@ -965,7 +986,12 @@ impl TermWindow {
                 MuxNotification::WindowRemoved(_window_id) => {
                     // Handled by frontend
                 }
-                _ => {}
+                MuxNotification::PaneAdded(_)
+                | MuxNotification::PaneRemoved(_)
+                | MuxNotification::WindowWorkspaceChanged(_)
+                | MuxNotification::ActiveWorkspaceChanged(_)
+                | MuxNotification::Empty
+                | MuxNotification::WindowCreated(_) => {}
             },
             TermWindowNotif::EmitStatusUpdate => {
                 self.emit_status_event();
@@ -1060,7 +1086,7 @@ impl TermWindow {
         match n {
             MuxNotification::Alert {
                 pane_id,
-                alert: Alert::TitleMaybeChanged | Alert::Bell,
+                alert: Alert::OutputSinceFocusLost | Alert::TitleMaybeChanged | Alert::Bell,
             }
             | MuxNotification::PaneOutput(pane_id) => {
                 // Ideally we'd check to see if pane_id is part of this window,
@@ -1110,7 +1136,18 @@ impl TermWindow {
                     return true;
                 }
             }
-            _ => return true,
+            MuxNotification::Alert {
+                alert:
+                    Alert::SetUserVar { .. }
+                    | Alert::ToastNotification { .. }
+                    | Alert::PaletteChanged { .. },
+                ..
+            }
+            | MuxNotification::PaneRemoved(_)
+            | MuxNotification::WindowCreated(_)
+            | MuxNotification::ActiveWorkspaceChanged(_)
+            | MuxNotification::Empty
+            | MuxNotification::WindowWorkspaceChanged(_) => return true,
         }
 
         window.notify(TermWindowNotif::MuxNotification(n));
@@ -1569,10 +1606,6 @@ impl TermWindow {
     }
 
     fn activate_tab(&mut self, tab_idx: isize) -> anyhow::Result<()> {
-        if let Some(tab) = self.get_active_pane_or_overlay() {
-            tab.focus_changed(false);
-        }
-
         let mux = Mux::get().unwrap();
         let mut window = mux
             .get_window_mut(self.mux_window_id)
@@ -1734,7 +1767,7 @@ impl TermWindow {
     }
 
     /// Returns the Prompt semantic zones
-    fn get_semantic_zones(&mut self, pane: &Rc<dyn Pane>) -> &[SemanticZone] {
+    fn get_semantic_prompt_zones(&mut self, pane: &Rc<dyn Pane>) -> &[StableRowIndex] {
         let mut cache = self
             .semantic_zones
             .entry(pane.pane_id())
@@ -1742,8 +1775,22 @@ impl TermWindow {
 
         let seqno = pane.get_current_seqno();
         if cache.seqno != seqno {
-            let mut zones = pane.get_semantic_zones().unwrap_or_else(|_| vec![]);
-            zones.retain(|zone| zone.semantic_type == wezterm_term::SemanticType::Prompt);
+            let zones = pane.get_semantic_zones().unwrap_or_else(|_| vec![]);
+            let mut zones: Vec<StableRowIndex> = zones
+                .into_iter()
+                .filter_map(|zone| {
+                    if zone.semantic_type == wezterm_term::SemanticType::Prompt {
+                        Some(zone.start_y)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            // dedup to avoid issues where both left and right prompts are
+            // defined: we only care if there were 1+ prompts on a line,
+            // not about how many prompts are on a line.
+            // <https://github.com/wez/wezterm/issues/1121>
+            zones.dedup();
             cache.zones = zones;
             cache.seqno = seqno;
         }
@@ -1760,15 +1807,15 @@ impl TermWindow {
             .get_viewport(pane.pane_id())
             .unwrap_or(dims.physical_top);
         let zone = {
-            let zones = self.get_semantic_zones(&pane);
-            let idx = match zones.binary_search_by(|zone| zone.start_y.cmp(&position)) {
+            let zones = self.get_semantic_prompt_zones(&pane);
+            let idx = match zones.binary_search(&position) {
                 Ok(idx) | Err(idx) => idx,
             };
             let idx = ((idx as isize) + amount).max(0) as usize;
             zones.get(idx).cloned()
         };
         if let Some(zone) = zone {
-            self.set_viewport(pane.pane_id(), Some(zone.start_y), dims);
+            self.set_viewport(pane.pane_id(), Some(zone), dims);
         }
 
         if let Some(win) = self.window.as_ref() {
@@ -2411,12 +2458,13 @@ impl TermWindow {
         }
     }
 
-    fn pos_pane_to_pane_info(&mut self, pos: &PositionedPane) -> PaneInformation {
+    fn pos_pane_to_pane_info(pos: &PositionedPane) -> PaneInformation {
         PaneInformation {
             pane_id: pos.pane.pane_id(),
             pane_index: pos.index,
             is_active: pos.is_active,
             is_zoomed: pos.is_zoomed,
+            has_unseen_output: pos.pane.has_unseen_output(),
             left: pos.left,
             top: pos.top,
             width: pos.width,
@@ -2449,7 +2497,7 @@ impl TermWindow {
                     active_pane: panes
                         .iter()
                         .find(|p| p.is_active)
-                        .map(|p| self.pos_pane_to_pane_info(p)),
+                        .map(Self::pos_pane_to_pane_info),
                 }
             })
             .collect()
@@ -2457,8 +2505,8 @@ impl TermWindow {
 
     fn get_pane_information(&mut self) -> Vec<PaneInformation> {
         self.get_panes_to_render()
-            .into_iter()
-            .map(|pos| self.pos_pane_to_pane_info(&pos))
+            .iter()
+            .map(Self::pos_pane_to_pane_info)
             .collect()
     }
 
