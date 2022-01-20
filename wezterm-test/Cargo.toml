@@ -1,0 +1,40 @@
+[package]
+name = "wezterm-test"
+version = "0.1.0"
+authors = ["Wez Furlong <wez@wezfurlong.org>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[build-dependencies]
+anyhow = "1.0"
+
+[dependencies]
+anyhow = "1.0"
+chrono = "0.4"
+codec = { path = "../codec" }
+config = { path = "../config" }
+crossterm = { version = "0.22", features = ["event-stream"] }
+env-bootstrap = { path = "../env-bootstrap" }
+filedescriptor = { version="0.8", path = "../filedescriptor" }
+futures = "0.3"
+futures-util = { version = "0.3", features = ["std", "async-await"], default-features = false }
+hostname = "0.3"
+log = "0.4"
+mux = { path = "../mux" }
+portable-pty = { path = "../pty" }
+promise = { path = "../promise" }
+signal-hook = { version = "0.3", featuers = ["iterator", "extended-siginfo", "channel"] }
+smol = "1.2"
+structopt = "0.3"
+tabout = { path = "../tabout" }
+termwiz = { path = "../termwiz" }
+textwrap = "0.14"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "io-std", "time", "process", "macros", "fs", "parking_lot"] }
+umask = { path = "../umask" }
+url = "2"
+wezterm-client = { path = "../wezterm-client" }
+wezterm-gui-subcommands = { path = "../wezterm-gui-subcommands" }
+wezterm-term = { path = "../term" }
+
+

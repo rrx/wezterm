@@ -4,7 +4,8 @@ members = [
   "wezterm",
   "wezterm-gui",
   "wezterm-mux-server",
-  "wezterm-ssh"
+  "wezterm-ssh",
+  "wezterm-test"
 ]
 resolver = "2"
 
