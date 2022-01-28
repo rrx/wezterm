@@ -1,3 +1,4 @@
+use anyhow::{anyhow, Context};
 use log::{error, warn};
 use futures::StreamExt;
 
@@ -7,6 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use mux::Mux;
+use std::rc::Rc;
 
 use anyhow::Error;
 
@@ -17,26 +20,26 @@ use crossterm::{
     execute, terminal,
     tty::IsTty,
 };
+use codec::Pdu;
 
-//use smol::prelude::*;
+use umask::UmaskSaver;
+use wezterm_client::client::{unix_connect_with_retry, Client, AsyncReadAndWrite, ReaderMessage};
+use config::{UnixDomain, wezterm_version};
 
 #[cfg(not(windows))]
 use {
     signal_hook::{consts::signal, low_level},
-    //signal_hook_tokio::Signals,
-    //signal_hook_async_std::Signals,
 };
 #[cfg(windows)]
 type Signals = futures_util::stream::Empty<()>;
 
 pub struct Application {
-    //signals: Signals
+    client: Client,
+    enable_mouse: bool
 }
 
 #[derive(Debug)]
 enum Msg {
-    Continue,
-    Stop,
     Signal(i32),
     Input(Event),
     Quit
@@ -44,12 +47,25 @@ enum Msg {
 
 impl Application {
     pub fn new() -> Result<Self, Error> {
+        let saver = UmaskSaver::new();
+
+        let mut ui = mux::connui::ConnectionUI::new_headless();
+        let initial = true;
+
+        let client = Client::new_default_unix_domain(
+            initial,
+            &mut ui,
+            false, //opts.no_auto_start,
+            true, //opts.prefer_mux,
+            wezterm_gui_subcommands::DEFAULT_WINDOW_CLASS)?;
+
         Ok(Self {
-            //signals
+            client,
+            enable_mouse: true
         })
     }
 
-    pub async fn event_loop(&mut self) {
+    pub async fn event_loop(&mut self) -> Result<(), Error> {
         use signal_hook::iterator::{Signals, SignalsInfo};
         //use signal_hook::iterator::exfiltrator::origin::WithOrigin;
         use signal_hook::low_level;
@@ -57,53 +73,98 @@ impl Application {
         let mut reader = EventStream::new().map(|e| {
             log::info!("key: {:?}", e);
             match e {
+                // handle Ctrl-C to exit for now
+                Ok(Event::Key(KeyEvent {
+                    code: KeyCode::Char('c'),
+                    modifiers: KeyModifiers::CONTROL,
+                })) => Msg::Quit,
+
+                Ok(Event::Key(KeyEvent {
+                    code: KeyCode::Char('q'),
+                    modifiers: KeyModifiers::NONE,
+                })) => Msg::Quit,
+
+                // handle suspend
+                Ok(Event::Key(KeyEvent {
+                    code: KeyCode::Char('z'),
+                    modifiers: KeyModifiers::CONTROL,
+                })) => Msg::Signal(signal::SIGTSTP),
+
                 Ok(event) => Msg::Input(event),
                 Err(e) => Msg::Quit
             }
         });
    
         let (tx, rx) = smol::channel::unbounded();
-
+ 
         // handle signals in a separate thread
-        let handle = std::thread::spawn(move || {
-            let mut sigs = Signals::new(&[signal::SIGTSTP, signal::SIGCONT, signal::SIGINT]).unwrap();
+        let mut sigs = Signals::new(&[signal::SIGHUP, signal::SIGTSTP, signal::SIGCONT]).unwrap();
+        let signals_handle = sigs.handle();
+        let _ = std::thread::spawn(move || {
             for sig in sigs.forever() {
                 log::info!("signal: {:?}", sig);
-                if sig == signal::SIGINT {
-                    tx.try_send(Msg::Quit).unwrap();
-                    break;
-                } else {
-                    tx.try_send(Msg::Signal(sig)).unwrap();
+                match sig {
+                    signal::SIGHUP | signal::SIGCONT | signal::SIGTSTP => {
+                        tx.try_send(Msg::Signal(sig)).unwrap();
+                    }
+                    _ => {
+                        log::info!("unhandled signal: {:?}", sig);
+                        break;
+                    }
                 }
             }
+            log::info!("signals thread exit");
         });
 
-        let mut s = smol::stream::empty::<Msg>();
+        let mux = Rc::new(mux::Mux::new(None));
+        Mux::set_mux(&mux);
+        let unix_dom = UnixDomain::default();
+        let target = unix_dom.target();
+        let mut u_stream = unix_connect_with_retry(&target, false, None)?;
+        let mut from_stream = Box::new(smol::Async::new(u_stream)?);
+
         let mut stream = smol::stream::race(reader, rx);
+
         loop {
-            let result = stream.next().await;
-            match result {
-                // handle Ctrl-C to exit for now
-                Some(Msg::Input(Event::Key(KeyEvent {
-                    code: KeyCode::Char('c'),
-                    modifiers: KeyModifiers::CONTROL,
-                }))) => break,
+            tokio::select! {
+                result = from_stream.readable() => {
+                    match result {
+                        Ok(()) => match Pdu::decode_async(&mut from_stream).await {
+                            Ok(decoded) => {
+                                log::info!("{:?}", decoded);
+                            }
+                            Err(err) => {
+                                let reason = format!("Error while decoding response pdu: {:#}", err);
+                                log::error!("{}", reason);
+                            }
+                        }
+                        _ =>  break
+                    }
+                }
 
-                // handle suspend
-                Some(Msg::Input(Event::Key(KeyEvent {
-                    code: KeyCode::Char('z'),
-                    modifiers: KeyModifiers::CONTROL,
-                }))) => self.handle_signals(signal::SIGTSTP).await,
-
-                Some(Msg::Input(event)) => self.handle_terminal_events(Some(Ok(event))),
-                Some(Msg::Signal(sig)) => self.handle_signals(sig).await,
-                Some(Msg::Quit) => break,
-                Some(m) => log::info!("{:?}", m),
-                None => break
+                result = stream.next() => {
+                    match result {
+                        Some(Msg::Input(event)) => self.handle_terminal_events(Some(Ok(event))),
+                        Some(Msg::Signal(sig)) => self.handle_signals(sig).await,
+                        Some(Msg::Quit) => {
+                            log::info!("quit");
+                            break;
+                        }
+                        Some(m) => log::info!("{:?}", m),
+                        None => {
+                            log::info!("none");
+                            break;
+                        }
+                    }
+                }
             }
         }
-        //handle.join().unwrap();
+
         log::info!("end loop");
+
+        // cancel the signals thread
+        signals_handle.close();
+        Ok(())
     }
 
     #[cfg(windows)]
@@ -178,9 +239,9 @@ impl Application {
         terminal::enable_raw_mode()?;
         let mut stdout = stdout();
         execute!(stdout, terminal::EnterAlternateScreen)?;
-        //if self.config.editor.mouse {
+        if self.enable_mouse {
             execute!(stdout, EnableMouseCapture)?;
-        //}
+        }
         Ok(())
     }
 
@@ -213,7 +274,6 @@ impl Application {
         self.claim_term().await?;
         self.event_loop().await;
         self.restore_term()?;
-        std::process::exit(0);
 
         Ok(0)//self.editor.exit_code)
     }
